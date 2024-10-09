@@ -246,7 +246,7 @@ def _format_schema(schema: Dict, is_enhanced: bool) -> str:
                         )
                 elif prop["type"] == "LIST":
                     # Skip embeddings
-                    if prop["min_size"] > LIST_LIMIT:
+                    if not prop.get("min_size") or prop["min_size"] > LIST_LIMIT:
                         continue
                     example = (
                         f'Min Size: {prop["min_size"]}, Max Size: {prop["max_size"]}'
@@ -285,6 +285,10 @@ def _format_schema(schema: Dict, is_enhanced: bool) -> str:
             "\n".join(formatted_rels),
         ]
     )
+
+
+def _remove_backticks(text: str) -> str:
+    return text.replace("`", "")
 
 
 class Neo4jGraph(GraphStore):
@@ -342,18 +346,27 @@ class Neo4jGraph(GraphStore):
             )
 
         url = get_from_dict_or_env({"url": url}, "url", "NEO4J_URI")
-        username = get_from_dict_or_env(
-            {"username": username}, "username", "NEO4J_USERNAME"
-        )
-        password = get_from_dict_or_env(
-            {"password": password}, "password", "NEO4J_PASSWORD"
-        )
+        # if username and password are "", assume Neo4j auth is disabled
+        if username == "" and password == "":
+            auth = None
+        else:
+            username = get_from_dict_or_env(
+                {"username": username},
+                "username",
+                "NEO4J_USERNAME",
+            )
+            password = get_from_dict_or_env(
+                {"password": password},
+                "password",
+                "NEO4J_PASSWORD",
+            )
+            auth = (username, password)
         database = get_from_dict_or_env(
             {"database": database}, "database", "NEO4J_DATABASE", "neo4j"
         )
 
         self._driver = neo4j.GraphDatabase.driver(
-            url, auth=(username, password), **(driver_config or {})
+            url, auth=auth, **(driver_config or {})
         )
         self._database = database
         self.timeout = timeout
@@ -397,7 +410,11 @@ class Neo4jGraph(GraphStore):
         """Returns the structured schema of the Graph"""
         return self.structured_schema
 
-    def query(self, query: str, params: dict = {}) -> List[Dict[str, Any]]:
+    def query(
+        self,
+        query: str,
+        params: dict = {},
+    ) -> List[Dict[str, Any]]:
         """Query Neo4j database.
 
         Args:
@@ -408,17 +425,44 @@ class Neo4jGraph(GraphStore):
             List[Dict[str, Any]]: The list of dictionaries containing the query results.
         """
         from neo4j import Query
-        from neo4j.exceptions import CypherSyntaxError
+        from neo4j.exceptions import Neo4jError
 
+        try:
+            data, _, _ = self._driver.execute_query(
+                Query(text=query, timeout=self.timeout),
+                database_=self._database,
+                parameters_=params,
+            )
+            json_data = [r.data() for r in data]
+            if self.sanitize:
+                json_data = [value_sanitize(el) for el in json_data]
+            return json_data
+        except Neo4jError as e:
+            if not (
+                (
+                    (  # isCallInTransactionError
+                        e.code == "Neo.DatabaseError.Statement.ExecutionFailed"
+                        or e.code
+                        == "Neo.DatabaseError.Transaction.TransactionStartFailed"
+                    )
+                    and "in an implicit transaction" in e.message
+                )
+                or (  # isPeriodicCommitError
+                    e.code == "Neo.ClientError.Statement.SemanticError"
+                    and (
+                        "in an open transaction is not possible" in e.message
+                        or "tried to execute in an explicit transaction" in e.message
+                    )
+                )
+            ):
+                raise
+        # fallback to allow implicit transactions
         with self._driver.session(database=self._database) as session:
-            try:
-                data = session.run(Query(text=query, timeout=self.timeout), params)
-                json_data = [r.data() for r in data]
-                if self.sanitize:
-                    json_data = [value_sanitize(el) for el in json_data]
-                return json_data
-            except CypherSyntaxError as e:
-                raise ValueError(f"Generated Cypher Statement is not valid\n{e}")
+            data = session.run(Query(text=query, timeout=self.timeout), params)
+            json_data = [r.data() for r in data]
+            if self.sanitize:
+                json_data = [value_sanitize(el) for el in json_data]
+            return json_data
 
     def refresh_schema(self) -> None:
         """
@@ -551,10 +595,11 @@ class Neo4jGraph(GraphStore):
                     el["labelsOrTypes"] == [BASE_ENTITY_LABEL]
                     and el["properties"] == ["id"]
                     for el in self.structured_schema.get("metadata", {}).get(
-                        "constraint"
+                        "constraint", []
                     )
                 ]
             )
+
             if not constraint_exists:
                 # Create constraint
                 self.query(
@@ -571,6 +616,9 @@ class Neo4jGraph(GraphStore):
                     document.source.page_content.encode("utf-8")
                 ).hexdigest()
 
+            # Remove backticks from node types
+            for node in document.nodes:
+                node.type = _remove_backticks(node.type)
             # Import nodes
             self.query(
                 node_import_query,
@@ -586,10 +634,12 @@ class Neo4jGraph(GraphStore):
                     "data": [
                         {
                             "source": el.source.id,
-                            "source_label": el.source.type,
+                            "source_label": _remove_backticks(el.source.type),
                             "target": el.target.id,
-                            "target_label": el.target.type,
-                            "type": el.type.replace(" ", "_").upper(),
+                            "target_label": _remove_backticks(el.target.type),
+                            "type": _remove_backticks(
+                                el.type.replace(" ", "_").upper()
+                            ),
                             "properties": el.properties,
                         }
                         for el in document.relationships
