@@ -271,6 +271,20 @@ class NonLocals(ast.NodeVisitor):
             if isinstance(parent, ast.Name):
                 self.loads.add(parent.id + "." + attr_expr)
                 self.loads.discard(parent.id)
+            elif isinstance(parent, ast.Call):
+                if isinstance(parent.func, ast.Name):
+                    self.loads.add(parent.func.id)
+                else:
+                    parent = parent.func
+                    attr_expr = ""
+                    while isinstance(parent, ast.Attribute):
+                        if attr_expr:
+                            attr_expr = parent.attr + "." + attr_expr
+                        else:
+                            attr_expr = parent.attr
+                        parent = parent.value
+                    if isinstance(parent, ast.Name):
+                        self.loads.add(parent.id + "." + attr_expr)
 
 
 class FunctionNonLocals(ast.NodeVisitor):
@@ -388,6 +402,7 @@ def get_lambda_source(func: Callable) -> Optional[str]:
         return name
 
 
+@lru_cache(maxsize=256)
 def get_function_nonlocals(func: Callable) -> list[Any]:
     """Get the nonlocal variables accessed by a function.
 
