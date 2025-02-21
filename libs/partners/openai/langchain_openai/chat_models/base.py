@@ -316,57 +316,6 @@ def _convert_delta_to_message_chunk(
         return default_class(content=content, id=id_)  # type: ignore
 
 
-def _convert_chunk_to_generation_chunk(
-    chunk: dict, default_chunk_class: Type, base_generation_info: Optional[Dict]
-) -> Optional[ChatGenerationChunk]:
-    if chunk.get("type") == "content.delta":  # from beta.chat.completions.stream
-        return None
-    token_usage = chunk.get("usage")
-    choices = (
-        chunk.get("choices", [])
-        # from beta.chat.completions.stream
-        or chunk.get("chunk", {}).get("choices", [])
-    )
-
-    usage_metadata: Optional[UsageMetadata] = (
-        _create_usage_metadata(token_usage) if token_usage else None
-    )
-    if len(choices) == 0:
-        # logprobs is implicitly None
-        generation_chunk = ChatGenerationChunk(
-            message=default_chunk_class(content="", usage_metadata=usage_metadata)
-        )
-        return generation_chunk
-
-    choice = choices[0]
-    if choice["delta"] is None:
-        return None
-
-    message_chunk = _convert_delta_to_message_chunk(
-        choice["delta"], default_chunk_class
-    )
-    generation_info = {**base_generation_info} if base_generation_info else {}
-
-    if finish_reason := choice.get("finish_reason"):
-        generation_info["finish_reason"] = finish_reason
-        if model_name := chunk.get("model"):
-            generation_info["model_name"] = model_name
-        if system_fingerprint := chunk.get("system_fingerprint"):
-            generation_info["system_fingerprint"] = system_fingerprint
-
-    logprobs = choice.get("logprobs")
-    if logprobs:
-        generation_info["logprobs"] = logprobs
-
-    if usage_metadata and isinstance(message_chunk, AIMessageChunk):
-        message_chunk.usage_metadata = usage_metadata
-
-    generation_chunk = ChatGenerationChunk(
-        message=message_chunk, generation_info=generation_info or None
-    )
-    return generation_chunk
-
-
 def _update_token_usage(
     overall_token_usage: Union[int, dict], new_usage: Union[int, dict]
 ) -> Union[int, dict]:
@@ -490,7 +439,7 @@ class BaseChatOpenAI(BaseChatModel):
     reasoning_effort: Optional[str] = None
     """Constrains effort on reasoning for reasoning models. 
     
-    o1 models only.
+    Reasoning models only, like OpenAI o1 and o3-mini.
 
     Currently supported values are low, medium, and high. Reducing reasoning effort 
     can result in faster responses and fewer tokens used on reasoning in a response.
@@ -560,15 +509,6 @@ class BaseChatOpenAI(BaseChatModel):
         model = values.get("model_name") or values.get("model") or ""
         if model.startswith("o1") and "temperature" not in values:
             values["temperature"] = 1
-        return values
-
-    @model_validator(mode="before")
-    @classmethod
-    def validate_disable_streaming(cls, values: Dict[str, Any]) -> Any:
-        """Disable streaming if n > 1."""
-        model = values.get("model_name") or values.get("model") or ""
-        if model == "o1" and values.get("disable_streaming") is None:
-            values["disable_streaming"] = True
         return values
 
     @model_validator(mode="after")
@@ -692,6 +632,59 @@ class BaseChatOpenAI(BaseChatModel):
             combined["system_fingerprint"] = system_fingerprint
         return combined
 
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: Type,
+        base_generation_info: Optional[Dict],
+    ) -> Optional[ChatGenerationChunk]:
+        if chunk.get("type") == "content.delta":  # from beta.chat.completions.stream
+            return None
+        token_usage = chunk.get("usage")
+        choices = (
+            chunk.get("choices", [])
+            # from beta.chat.completions.stream
+            or chunk.get("chunk", {}).get("choices", [])
+        )
+
+        usage_metadata: Optional[UsageMetadata] = (
+            _create_usage_metadata(token_usage) if token_usage else None
+        )
+        if len(choices) == 0:
+            # logprobs is implicitly None
+            generation_chunk = ChatGenerationChunk(
+                message=default_chunk_class(content="", usage_metadata=usage_metadata)
+            )
+            return generation_chunk
+
+        choice = choices[0]
+        if choice["delta"] is None:
+            return None
+
+        message_chunk = _convert_delta_to_message_chunk(
+            choice["delta"], default_chunk_class
+        )
+        generation_info = {**base_generation_info} if base_generation_info else {}
+
+        if finish_reason := choice.get("finish_reason"):
+            generation_info["finish_reason"] = finish_reason
+            if model_name := chunk.get("model"):
+                generation_info["model_name"] = model_name
+            if system_fingerprint := chunk.get("system_fingerprint"):
+                generation_info["system_fingerprint"] = system_fingerprint
+
+        logprobs = choice.get("logprobs")
+        if logprobs:
+            generation_info["logprobs"] = logprobs
+
+        if usage_metadata and isinstance(message_chunk, AIMessageChunk):
+            message_chunk.usage_metadata = usage_metadata
+
+        generation_chunk = ChatGenerationChunk(
+            message=message_chunk, generation_info=generation_info or None
+        )
+        return generation_chunk
+
     def _stream(
         self,
         messages: List[BaseMessage],
@@ -727,7 +720,7 @@ class BaseChatOpenAI(BaseChatModel):
                 for chunk in response:
                     if not isinstance(chunk, dict):
                         chunk = chunk.model_dump()
-                    generation_chunk = _convert_chunk_to_generation_chunk(
+                    generation_chunk = self._convert_chunk_to_generation_chunk(
                         chunk,
                         default_chunk_class,
                         base_generation_info if is_first_chunk else {},
@@ -895,7 +888,7 @@ class BaseChatOpenAI(BaseChatModel):
                 async for chunk in response:
                     if not isinstance(chunk, dict):
                         chunk = chunk.model_dump()
-                    generation_chunk = _convert_chunk_to_generation_chunk(
+                    generation_chunk = self._convert_chunk_to_generation_chunk(
                         chunk,
                         default_chunk_class,
                         base_generation_info if is_first_chunk else {},
@@ -1183,6 +1176,7 @@ class BaseChatOpenAI(BaseChatModel):
             Union[dict, str, Literal["auto", "none", "required", "any"], bool]
         ] = None,
         strict: Optional[bool] = None,
+        parallel_tool_calls: Optional[bool] = None,
         **kwargs: Any,
     ) -> Runnable[LanguageModelInput, BaseMessage]:
         """Bind tool-like objects to this chat model.
@@ -1208,6 +1202,8 @@ class BaseChatOpenAI(BaseChatModel):
                 If False, input schema will not be validated and model output will not
                 be validated.
                 If None, ``strict`` argument will not be passed to the model.
+            parallel_tool_calls: Set to ``False`` to disable parallel tool use.
+                Defaults to ``None`` (no specification, which allows parallel tool use).
             kwargs: Any additional parameters are passed directly to
                 :meth:`~langchain_openai.chat_models.base.ChatOpenAI.bind`.
 
@@ -1217,6 +1213,8 @@ class BaseChatOpenAI(BaseChatModel):
 
         """  # noqa: E501
 
+        if parallel_tool_calls is not None:
+            kwargs["parallel_tool_calls"] = parallel_tool_calls
         formatted_tools = [
             convert_to_openai_tool(tool, strict=strict) for tool in tools
         ]
@@ -1354,19 +1352,33 @@ class BaseChatOpenAI(BaseChatModel):
             )
         is_pydantic_schema = _is_pydantic_class(schema)
 
-        # Check for Pydantic BaseModel V1
-        if (
-            method == "json_schema"
-            and is_pydantic_schema
-            and issubclass(schema, BaseModelV1)  # type: ignore[arg-type]
-        ):
-            warnings.warn(
-                "Received a Pydantic BaseModel V1 schema. This is not supported by "
-                'method="json_schema". Please use method="function_calling" '
-                "or specify schema via JSON Schema or Pydantic V2 BaseModel. "
-                'Overriding to method="function_calling".'
-            )
-            method = "function_calling"
+        if method == "json_schema":
+            # Check for Pydantic BaseModel V1
+            if (
+                is_pydantic_schema and issubclass(schema, BaseModelV1)  # type: ignore[arg-type]
+            ):
+                warnings.warn(
+                    "Received a Pydantic BaseModel V1 schema. This is not supported by "
+                    'method="json_schema". Please use method="function_calling" '
+                    "or specify schema via JSON Schema or Pydantic V2 BaseModel. "
+                    'Overriding to method="function_calling".'
+                )
+                method = "function_calling"
+            # Check for incompatible model
+            if self.model_name and (
+                self.model_name.startswith("gpt-3")
+                or self.model_name.startswith("gpt-4-")
+                or self.model_name == "gpt-4"
+            ):
+                warnings.warn(
+                    f"Cannot use method='json_schema' with model {self.model_name} "
+                    f"since it doesn't support OpenAI's Structured Output API. You can "
+                    f"see supported models here: "
+                    f"https://platform.openai.com/docs/guides/structured-outputs#supported-models. "  # noqa: E501
+                    "To fix this warning, set `method='function_calling'. "
+                    "Overriding to method='function_calling'."
+                )
+                method = "function_calling"
 
         if method == "function_calling":
             if schema is None:
@@ -1376,7 +1388,13 @@ class BaseChatOpenAI(BaseChatModel):
                 )
             tool_name = convert_to_openai_tool(schema)["function"]["name"]
             bind_kwargs = self._filter_disabled_params(
-                tool_choice=tool_name, parallel_tool_calls=False, strict=strict
+                tool_choice=tool_name,
+                parallel_tool_calls=False,
+                strict=strict,
+                structured_output_format={
+                    "kwargs": {"method": method},
+                    "schema": schema,
+                },
             )
 
             llm = self.bind_tools([schema], **bind_kwargs)
@@ -1390,7 +1408,13 @@ class BaseChatOpenAI(BaseChatModel):
                     key_name=tool_name, first_tool_only=True
                 )
         elif method == "json_mode":
-            llm = self.bind(response_format={"type": "json_object"})
+            llm = self.bind(
+                response_format={"type": "json_object"},
+                structured_output_format={
+                    "kwargs": {"method": method},
+                    "schema": schema,
+                },
+            )
             output_parser = (
                 PydanticOutputParser(pydantic_object=schema)  # type: ignore[arg-type]
                 if is_pydantic_schema
@@ -1403,7 +1427,13 @@ class BaseChatOpenAI(BaseChatModel):
                     "Received None."
                 )
             response_format = _convert_to_openai_response_format(schema, strict=strict)
-            llm = self.bind(response_format=response_format)
+            llm = self.bind(
+                response_format=response_format,
+                structured_output_format={
+                    "kwargs": {"method": method},
+                    "schema": convert_to_openai_tool(schema),
+                },
+            )
             if is_pydantic_schema:
                 output_parser = _oai_structured_outputs_parser.with_types(
                     output_type=cast(type, schema)
@@ -1451,6 +1481,9 @@ class BaseChatOpenAI(BaseChatModel):
         chat_message = chat_result.generations[0].message
         if isinstance(chat_message, AIMessage):
             usage_metadata = chat_message.usage_metadata
+            # Skip tool_calls, already sent as chunks
+            if "tool_calls" in chat_message.additional_kwargs:
+                chat_message.additional_kwargs.pop("tool_calls")
         else:
             usage_metadata = None
         message = AIMessageChunk(
@@ -1583,7 +1616,7 @@ class ChatOpenAI(BaseChatOpenAI):  # type: ignore[override]
         .. code-block:: python
 
             for chunk in llm.stream(messages):
-                print(chunk)
+                print(chunk.text(), end="")
 
         .. code-block:: python
 
@@ -2486,7 +2519,7 @@ def _oai_structured_outputs_parser(ai_msg: AIMessage) -> PydanticBaseModel:
     else:
         raise ValueError(
             "Structured Output response does not have a 'parsed' field nor a 'refusal' "
-            "field. Received message:\n\n{ai_msg}"
+            f"field. Received message:\n\n{ai_msg}"
         )
 
 
