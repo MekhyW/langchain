@@ -6,7 +6,6 @@ from uuid import UUID
 
 import pytest
 from blockbuster import BlockBuster, blockbuster_ctx
-from pytest import Config, Function, Parser
 from pytest_mock import MockerFixture
 
 
@@ -36,7 +35,7 @@ def blockbuster() -> Iterator[BlockBuster]:
         yield bb
 
 
-def pytest_addoption(parser: Parser) -> None:
+def pytest_addoption(parser: pytest.Parser) -> None:
     """Add custom command line options to pytest."""
     parser.addoption(
         "--only-extended",
@@ -50,7 +49,9 @@ def pytest_addoption(parser: Parser) -> None:
     )
 
 
-def pytest_collection_modifyitems(config: Config, items: Sequence[Function]) -> None:
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: Sequence[pytest.Function]
+) -> None:
     """Add implementations for handling custom markers.
 
     At the moment, this adds support for a custom `requires` marker.
@@ -60,11 +61,10 @@ def pytest_collection_modifyitems(config: Config, items: Sequence[Function]) -> 
 
     The `requires` marker syntax is:
 
-    .. code-block:: python
-
-        @pytest.mark.requires("package1", "package2")
-        def test_something():
-            ...
+    ```python
+    @pytest.mark.requires("package1", "package2")
+    def test_something(): ...
+    ```
     """
     # Mapping from the name of a package to whether it is installed or not.
     # Used to avoid repeated calls to `util.find_spec`
@@ -111,14 +111,11 @@ def pytest_collection_modifyitems(config: Config, items: Sequence[Function]) -> 
                             pytest.mark.skip(reason=f"Requires pkg: `{pkg}`")
                         )
                         break
-        else:
-            if only_extended:
-                item.add_marker(
-                    pytest.mark.skip(reason="Skipping not an extended test.")
-                )
+        elif only_extended:
+            item.add_marker(pytest.mark.skip(reason="Skipping not an extended test."))
 
 
-@pytest.fixture()
+@pytest.fixture
 def deterministic_uuids(mocker: MockerFixture) -> MockerFixture:
     side_effect = (
         UUID(f"00000000-0000-4000-8000-{i:012}", version=4) for i in range(10000)

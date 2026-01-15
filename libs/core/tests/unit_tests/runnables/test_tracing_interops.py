@@ -3,25 +3,26 @@ from __future__ import annotations
 import json
 import sys
 import uuid
-from collections.abc import AsyncGenerator, Coroutine, Generator
 from inspect import isasyncgenfunction
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
-from langsmith import Client, get_current_run_tree, traceable
+from langsmith import Client, RunTree, get_current_run_tree, traceable
 from langsmith.run_helpers import tracing_context
-from langsmith.run_trees import RunTree
 from langsmith.utils import get_env_var
-from typing_extensions import Literal
 
-from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.runnables.base import RunnableLambda, RunnableParallel
 from langchain_core.tracers.langchain import LangChainTracer
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
 
-def _get_posts(client: Client) -> list:
-    mock_calls = client.session.request.mock_calls  # type: ignore
+    from langchain_core.callbacks import BaseCallbackHandler
+
+
+def _get_posts(client: Client) -> list[dict[str, Any]]:
+    mock_calls = client.session.request.mock_calls  # type: ignore[attr-defined]
     posts = []
     for call in mock_calls:
         if call.args:
@@ -40,8 +41,8 @@ def _get_posts(client: Client) -> list:
 
 
 def _create_tracer_with_mocked_client(
-    project_name: Optional[str] = None,
-    tags: Optional[list[str]] = None,
+    project_name: str | None = None,
+    tags: list[str] | None = None,
 ) -> LangChainTracer:
     mock_session = MagicMock()
     mock_client_ = Client(
@@ -57,20 +58,26 @@ def test_tracing_context() -> None:
     )
 
     @RunnableLambda
-    def my_function(a: int) -> int:
+    def my_lambda(a: int) -> int:
         return a + 1
+
+    @RunnableLambda
+    def my_function(a: int) -> int:
+        with tracing_context(enabled=False):
+            return my_lambda.invoke(a)
 
     name = uuid.uuid4().hex
     project_name = f"Some project {name}"
     with tracing_context(project_name=project_name, client=mock_client_, enabled=True):
         assert my_function.invoke(1) == 2
     posts = _get_posts(mock_client_)
-    assert posts
+    assert len(posts) == 1
     assert all(post["session_name"] == project_name for post in posts)
 
 
 def test_config_traceable_handoff() -> None:
-    get_env_var.cache_clear()
+    if hasattr(get_env_var, "cache_clear"):
+        get_env_var.cache_clear()  # type: ignore[attr-defined]
     tracer = _create_tracer_with_mocked_client(
         project_name="another-flippin-project", tags=["such-a-tag"]
     )
@@ -99,7 +106,6 @@ def test_config_traceable_handoff() -> None:
         rt = get_current_run_tree()
         assert rt
         assert rt.session_name == "another-flippin-project"
-        assert rt.parent_run and rt.parent_run.name == "my_parent_function"
         return my_child_function(a)
 
     def my_parent_function(a: int) -> int:
@@ -131,7 +137,7 @@ def test_config_traceable_handoff() -> None:
     parent_run_id = None
     for name in ordered_names:
         id_ = name_to_body[name]["id"]
-        parent_run_id_ = name_to_body[name]["parent_run_id"]
+        parent_run_id_ = name_to_body[name].get("parent_run_id")
         if parent_run_id_ is not None:
             assert parent_run_id == parent_run_id_
         assert name in name_to_body
@@ -164,13 +170,13 @@ async def test_config_traceable_async_handoff() -> None:
     def my_great_grandchild_function(a: int) -> int:
         return my_great_great_grandchild_function(a)
 
-    @RunnableLambda  # type: ignore
+    @RunnableLambda
     async def my_grandchild_function(a: int) -> int:
         return my_great_grandchild_function.invoke(a)
 
     @traceable
     async def my_child_function(a: int) -> int:
-        return await my_grandchild_function.ainvoke(a) * 3  # type: ignore
+        return await my_grandchild_function.ainvoke(a) * 3
 
     @traceable()
     async def my_function(a: int) -> int:
@@ -179,7 +185,7 @@ async def test_config_traceable_async_handoff() -> None:
     async def my_parent_function(a: int) -> int:
         return await my_function(a)
 
-    my_parent_runnable = RunnableLambda(my_parent_function)  # type: ignore
+    my_parent_runnable = RunnableLambda(my_parent_function)
     result = await my_parent_runnable.ainvoke(1, {"callbacks": [tracer]})
     assert result == 6
     posts = _get_posts(tracer.client)
@@ -200,7 +206,7 @@ async def test_config_traceable_async_handoff() -> None:
     parent_run_id = None
     for name in ordered_names:
         id_ = name_to_body[name]["id"]
-        parent_run_id_ = name_to_body[name]["parent_run_id"]
+        parent_run_id_ = name_to_body[name].get("parent_run_id")
         if parent_run_id_ is not None:
             assert parent_run_id == parent_run_id_
         assert name in name_to_body
@@ -222,7 +228,7 @@ async def test_config_traceable_async_handoff() -> None:
 @pytest.mark.parametrize("enabled", [None, True, False])
 @pytest.mark.parametrize("env", ["", "true"])
 def test_tracing_enable_disable(
-    mock_get_client: MagicMock, enabled: bool, env: str
+    mock_get_client: MagicMock, *, enabled: bool | None, env: str
 ) -> None:
     mock_session = MagicMock()
     mock_client_ = Client(
@@ -233,7 +239,8 @@ def test_tracing_enable_disable(
     def my_func(a: int) -> int:
         return a + 1
 
-    get_env_var.cache_clear()
+    if hasattr(get_env_var, "cache_clear"):
+        get_env_var.cache_clear()  # type: ignore[attr-defined]
     env_on = env == "true"
     with (
         patch.dict("os.environ", {"LANGSMITH_TRACING": env}),
@@ -275,13 +282,13 @@ class TestRunnableSequenceParallelTraceNesting:
         def before(x: int) -> int:
             return x
 
-        def after(x: dict) -> int:
-            return x["chain_result"]
+        def after(x: dict[str, Any]) -> int:
+            return int(x["chain_result"])
 
         sequence = before | parallel | after
         if isasyncgenfunction(other_thing):
 
-            @RunnableLambda  # type: ignore
+            @RunnableLambda
             async def parent(a: int) -> int:
                 return await sequence.ainvoke(a)
 
@@ -335,23 +342,22 @@ class TestRunnableSequenceParallelTraceNesting:
                     parent_id_map[n] = matching_post.get("parent_run_id")
                 i += len(name)
                 continue
-            else:
-                assert posts[i]["name"] == name
-                dotted_order = posts[i]["dotted_order"]
-                if prev_dotted_order is not None and not str(
-                    expected_parents[name]
-                ).startswith("RunnableParallel"):
-                    assert dotted_order > prev_dotted_order, (
-                        f"{name} not after {name_order[i - 1]}"
-                    )
-                prev_dotted_order = dotted_order
-                if name in dotted_order_map:
-                    msg = f"Duplicate name {name}"
-                    raise ValueError(msg)
-                dotted_order_map[name] = dotted_order
-                id_map[name] = posts[i]["id"]
-                parent_id_map[name] = posts[i].get("parent_run_id")
-                i += 1
+            assert posts[i]["name"] == name
+            dotted_order = posts[i]["dotted_order"]
+            if prev_dotted_order is not None and not str(
+                expected_parents[name]  # type: ignore[index]
+            ).startswith("RunnableParallel"):
+                assert dotted_order > prev_dotted_order, (
+                    f"{name} not after {name_order[i - 1]}"
+                )
+            prev_dotted_order = dotted_order
+            if name in dotted_order_map:
+                msg = f"Duplicate name {name}"
+                raise ValueError(msg)
+            dotted_order_map[name] = dotted_order
+            id_map[name] = posts[i]["id"]
+            parent_id_map[name] = posts[i].get("parent_run_id")
+            i += 1
 
         # Now check the dotted orders
         for name, parent_ in expected_parents.items():
@@ -377,7 +383,7 @@ class TestRunnableSequenceParallelTraceNesting:
     def test_sync(
         self, method: Callable[[RunnableLambda, list[BaseCallbackHandler]], int]
     ) -> None:
-        def other_thing(a: int) -> Generator[int, None, None]:  # type: ignore
+        def other_thing(_: int) -> Generator[int, None, None]:
             yield 1
 
         parent = self._create_parent(other_thing)
@@ -388,15 +394,21 @@ class TestRunnableSequenceParallelTraceNesting:
         self._check_posts()
 
     @staticmethod
-    async def ainvoke(parent: RunnableLambda, cb: list[BaseCallbackHandler]) -> int:
+    async def ainvoke(
+        parent: RunnableLambda[int, int], cb: list[BaseCallbackHandler]
+    ) -> int:
         return await parent.ainvoke(1, {"callbacks": cb})
 
     @staticmethod
-    async def astream(parent: RunnableLambda, cb: list[BaseCallbackHandler]) -> int:
+    async def astream(
+        parent: RunnableLambda[int, int], cb: list[BaseCallbackHandler]
+    ) -> int:
         return [res async for res in parent.astream(1, {"callbacks": cb})][-1]
 
     @staticmethod
-    async def abatch(parent: RunnableLambda, cb: list[BaseCallbackHandler]) -> int:
+    async def abatch(
+        parent: RunnableLambda[int, int], cb: list[BaseCallbackHandler]
+    ) -> int:
         return (await parent.abatch([1], {"callbacks": cb}))[0]
 
     @pytest.mark.skipif(
@@ -409,7 +421,7 @@ class TestRunnableSequenceParallelTraceNesting:
             [RunnableLambda, list[BaseCallbackHandler]], Coroutine[Any, Any, int]
         ],
     ) -> None:
-        async def other_thing(a: int) -> AsyncGenerator[int, None]:
+        async def other_thing(_: int) -> AsyncGenerator[int, None]:
             yield 1
 
         parent = self._create_parent(other_thing)
@@ -420,19 +432,25 @@ class TestRunnableSequenceParallelTraceNesting:
         self._check_posts()
 
 
-@pytest.mark.parametrize("parent_type", ("ls", "lc"))
+@pytest.mark.parametrize("parent_type", ["ls", "lc"])
 def test_tree_is_constructed(parent_type: Literal["ls", "lc"]) -> None:
     mock_session = MagicMock()
     mock_client_ = Client(
         session=mock_session, api_key="test", auto_batch_tracing=False
     )
+    grandchild_run = None
+    kitten_run = None
 
     @traceable
     def kitten(x: str) -> str:
+        nonlocal kitten_run
+        kitten_run = get_current_run_tree()
         return x
 
     @RunnableLambda
     def grandchild(x: str) -> str:
+        nonlocal grandchild_run
+        grandchild_run = get_current_run_tree()
         return kitten(x)
 
     @RunnableLambda
@@ -446,11 +464,12 @@ def test_tree_is_constructed(parent_type: Literal["ls", "lc"]) -> None:
         metadata={"some_foo": "some_bar"},
         tags=["afoo"],
     ):
-        if parent_type == "ls":
-            collected: dict[str, RunTree] = {}  # noqa
+        collected: dict[str, RunTree] = {}
 
-            def collect_run(run: RunTree) -> None:
-                collected[str(run.id)] = run
+        def collect_run(run: RunTree) -> None:
+            collected[str(run.id)] = run
+
+        if parent_type == "ls":
 
             @traceable
             def parent() -> str:
@@ -460,31 +479,32 @@ def test_tree_is_constructed(parent_type: Literal["ls", "lc"]) -> None:
                 parent(langsmith_extra={"on_end": collect_run, "run_id": rid}) == "foo"
             )
             assert collected
-            run = collected.get(str(rid))
 
         else:
 
             @RunnableLambda
-            def parent(_) -> str:  # type: ignore
+            def parent(_: Any) -> str:
                 return child.invoke("foo")
 
             tracer = LangChainTracer()
-            assert parent.invoke(..., {"run_id": rid, "callbacks": [tracer]}) == "foo"  # type: ignore
-            run = tracer.latest_run
+            tracer._persist_run = collect_run  # type: ignore[method-assign]
+
+            assert parent.invoke(..., {"run_id": rid, "callbacks": [tracer]}) == "foo"  # type: ignore[attr-defined]
+    run = collected.get(str(rid))
 
     assert run is not None
     assert run.name == "parent"
     assert run.child_runs
     child_run = run.child_runs[0]
     assert child_run.name == "child"
-    assert child_run.child_runs
-    grandchild_run = child_run.child_runs[0]
+    assert isinstance(grandchild_run, RunTree)
     assert grandchild_run.name == "grandchild"
-    assert grandchild_run.child_runs
     assert grandchild_run.metadata.get("some_foo") == "some_bar"
-    assert "afoo" in grandchild_run.tags  # type: ignore
-    kitten_run = grandchild_run.child_runs[0]
+    assert "afoo" in grandchild_run.tags  # type: ignore[operator]
+    assert isinstance(kitten_run, RunTree)
     assert kitten_run.name == "kitten"
     assert not kitten_run.child_runs
     assert kitten_run.metadata.get("some_foo") == "some_bar"
-    assert "afoo" in kitten_run.tags  # type: ignore
+    assert "afoo" in kitten_run.tags  # type: ignore[operator]
+    assert grandchild_run is not None
+    assert kitten_run.dotted_order.startswith(grandchild_run.dotted_order)

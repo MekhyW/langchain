@@ -1,6 +1,4 @@
-"""Standard LangChain interface tests"""
-
-from typing import Type
+"""Standard LangChain interface tests."""
 
 import pytest
 from langchain_core.language_models import BaseChatModel
@@ -14,13 +12,13 @@ from langchain_fireworks import ChatFireworks
 
 class TestFireworksStandard(ChatModelIntegrationTests):
     @property
-    def chat_model_class(self) -> Type[BaseChatModel]:
+    def chat_model_class(self) -> type[BaseChatModel]:
         return ChatFireworks
 
     @property
     def chat_model_params(self) -> dict:
         return {
-            "model": "accounts/fireworks/models/llama-v3p1-70b-instruct",
+            "model": "fireworks/kimi-k2-instruct-0905",
             "temperature": 0,
         }
 

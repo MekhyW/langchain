@@ -39,7 +39,7 @@ async def test_same_event_loop() -> None:
                 **item,
             }
 
-    asyncio.create_task(producer())
+    producer_task = asyncio.create_task(producer())
 
     items = [item async for item in consumer()]
 
@@ -56,6 +56,8 @@ async def test_same_event_loop() -> None:
         assert math.isclose(delta_time, 0, abs_tol=0.010) is True, (
             f"delta_time: {delta_time}"
         )
+
+    await producer_task
 
 
 async def test_queue_for_streaming_via_sync_call() -> None:
@@ -118,7 +120,7 @@ def test_send_to_closed_stream() -> None:
 
     We may want to handle this in a better way in the future.
     """
-    event_loop = asyncio.get_event_loop()
+    event_loop = asyncio.new_event_loop()
     channel = _MemoryStream[str](event_loop)
     writer = channel.get_send_stream()
     # send with an open even loop

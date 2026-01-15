@@ -1,29 +1,30 @@
-Thank you for contributing to LangChain!
+(Replace this entire block of text)
 
-- [ ] **PR title**: "package: description"
-  - Where "package" is whichever of langchain, community, core, etc. is being modified. Use "docs: ..." for purely docs changes, "infra: ..." for CI changes.
-  - Example: "community: add foobar LLM"
+Read the full contributing guidelines: https://docs.langchain.com/oss/python/contributing/overview
 
+Thank you for contributing to LangChain! Follow these steps to have your pull request considered as ready for review.
 
-- [ ] **PR message**: ***Delete this entire checklist*** and replace with
-    - **Description:** a description of the change
-    - **Issue:** the issue # it fixes, if applicable
-    - **Dependencies:** any dependencies required for this change
-    - **Twitter handle:** if your PR gets announced, and you'd like a mention, we'll gladly shout you out!
+1. PR title: Should follow the format: TYPE(SCOPE): DESCRIPTION
 
+  - Examples:
+    - fix(anthropic): resolve flag parsing error
+    - feat(core): add multi-tenant support
+    - test(openai): update API usage tests
+  - Allowed TYPE and SCOPE values: https://github.com/langchain-ai/langchain/blob/master/.github/workflows/pr_lint.yml#L15-L33
 
-- [ ] **Add tests and docs**: If you're adding a new integration, please include
-  1. a test for the integration, preferably unit tests that do not rely on network access,
-  2. an example notebook showing its use. It lives in `docs/docs/integrations` directory.
+2. PR description:
 
+  - Write 1-2 sentences summarizing the change.
+  - If this PR addresses a specific issue, please include "Fixes #ISSUE_NUMBER" in the description to automatically close the issue when the PR is merged.
+  - If there are any breaking changes, please clearly describe them.
+  - If this PR depends on another PR being merged first, please include "Depends on #PR_NUMBER" inthe description.
 
-- [ ] **Lint and test**: Run `make format`, `make lint` and `make test` from the root of the package(s) you've modified. See contribution guidelines for more: https://python.langchain.com/docs/contributing/
+3. Run `make format`, `make lint` and `make test` from the root of the package(s) you've modified.
+
+  - We will not consider a PR unless these three are passing in CI.
 
 Additional guidelines:
-- Make sure optional dependencies are imported within a function.
-- Please do not add dependencies to pyproject.toml files (even optional ones) unless they are required for unit tests.
-- Most PRs should not touch more than one package.
-- Changes should be backwards compatible.
-- If you are adding something to community, do not re-import it in langchain.
 
-If no one reviews your PR within a few days, please @-mention one of baskaryan, efriis, eyurtsev, ccurme, vbarda, hwchase17.
+  - We ask that if you use generative AI for your contribution, you include a disclaimer.
+  - PRs should not touch more than one package unless absolutely necessary.
+  - Do not update the `uv.lock` files unless or add dependencies to `pyproject.toml` files (even optional ones) unless you have explicit permission to do so by a maintainer.
